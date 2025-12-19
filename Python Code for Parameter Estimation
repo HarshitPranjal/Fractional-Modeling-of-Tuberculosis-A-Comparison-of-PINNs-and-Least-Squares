@@ -1,0 +1,159 @@
+# ======================================================
+# REPRODUCIBILITY
+# ======================================================
+SEED = 42
+import random
+random.seed(SEED)
+
+import numpy as np
+np.random.seed(SEED)
+
+import torch
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+import torch.nn as nn
+import torch.optim as optim
+from scipy.optimize import minimize
+from scipy.interpolate import interp1d
+
+# ======================================================
+# DATA
+# ======================================================
+I_data = np.array([179.5,179.8,179.6,197.7,178.5,177.3,175.1,172.2,169.5,166.9,163.2,
+                   160.5,156.9,152.6,149.5,146,141.2,137.9,134.5,131.4,128,130.9])
+D_data = np.array([32.4,31.4,30.4,29.4,28,27.2,26.1,24.9,23.9,22.6,
+                   21.5,20.6,19.7,19,18.2,17.4,16.8,16.1,15.6,14.9,14.4,14])
+
+pop = 1e5
+I_data_scaled = I_data / pop
+D_data_scaled = D_data / pop
+
+years = np.arange(2000, 2000 + len(I_data_scaled))
+names = ['Lambda','beta1','beta2','gamma1','gamma2','delta1','delta2']
+
+# ======================================================
+# CLS MODEL
+# ======================================================
+def simulate_model(theta, years):
+    Lambda, beta1, beta2, gamma1, gamma2, delta1, delta2 = theta
+    sigma, p, mu = 0.5, 0.6, 0.0001
+
+    dt = 0.1
+    n_steps = int((years[-1]-years[0])/dt) + 1
+    t_grid = np.linspace(years[0], years[-1], n_steps)
+
+    S = np.zeros(n_steps)
+    E = np.zeros(n_steps)
+    I1 = np.zeros(n_steps)
+    I2 = np.zeros(n_steps)
+    R = np.zeros(n_steps)
+
+    S[0], E[0], I1[0], I2[0], R[0] = 10, 5, 3, 1, 0
+
+    for t in range(1, n_steps):
+        S[t]  = S[t-1] + dt*(Lambda - beta1*S[t-1]*I1[t-1] - beta2*S[t-1]*I2[t-1] - mu*S[t-1])
+        E[t]  = E[t-1] + dt*(beta1*S[t-1]*I1[t-1] + beta2*S[t-1]*I2[t-1] - (sigma + mu)*E[t-1])
+        I1[t] = I1[t-1] + dt*(p*sigma*E[t-1] - (gamma1 + mu + delta1)*I1[t-1])
+        I2[t] = I2[t-1] + dt*((1-p)*sigma*E[t-1] - (gamma2 + mu + delta2)*I2[t-1])
+        R[t]  = R[t-1] + dt*(gamma1*I1[t-1] + gamma2*I2[t-1] - mu*R[t-1])
+
+    I_total = I1 + I2
+    D_total = delta1*I1 + delta2*I2
+
+    I_interp = interp1d(t_grid, I_total)
+    D_interp = interp1d(t_grid, D_total)
+
+    return I_interp(years), D_interp(years)
+
+def cls_objective(theta):
+    I_pred, D_pred = simulate_model(theta, years)
+    return np.mean((I_pred - I_data_scaled)**2) + \
+           np.mean((D_pred - D_data_scaled[:len(years)])**2)
+
+theta0 = [0.00016, 0.36, 0.18, 0.14, 0.10, 0.0007, 0.0009]
+bounds = [(1e-5,1e-3),(0.1,1),(0.05,0.5),(0.05,0.3),(0.05,0.2),(1e-4,0.01),(1e-4,0.01)]
+
+res = minimize(cls_objective, theta0, bounds=bounds, method='L-BFGS-B')
+theta_cls = res.x
+cls_error = cls_objective(theta_cls)
+
+# ======================================================
+# PINNs
+# ======================================================
+t_tensor = torch.tensor(years, dtype=torch.float32).unsqueeze(-1)
+
+class PINN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1, 32), nn.Tanh(),
+            nn.Linear(32, 32), nn.Tanh(),
+            nn.Linear(32, 5)
+        )
+
+    def forward(self, t):
+        return self.net(t)
+
+model = PINN()
+theta = nn.Parameter(torch.log(torch.tensor(theta0, dtype=torch.float32)))
+
+def pinn_loss():
+    sigma, p, mu = 0.5, 0.6, 0.0001
+    Lambda, beta1, beta2, gamma1, gamma2, delta1, delta2 = torch.exp(theta)
+
+    t_tensor.requires_grad_(True)
+    S,E,I1,I2,R = model(t_tensor).T
+
+    dS  = torch.autograd.grad(S, t_tensor, torch.ones_like(S), create_graph=True)[0]
+    dE  = torch.autograd.grad(E, t_tensor, torch.ones_like(E), create_graph=True)[0]
+    dI1 = torch.autograd.grad(I1, t_tensor, torch.ones_like(I1), create_graph=True)[0]
+    dI2 = torch.autograd.grad(I2, t_tensor, torch.ones_like(I2), create_graph=True)[0]
+    dR  = torch.autograd.grad(R, t_tensor, torch.ones_like(R), create_graph=True)[0]
+
+    phys = (dS - (Lambda - beta1*S*I1 - beta2*S*I2 - mu*S))**2
+    phys += (dE - (beta1*S*I1 + beta2*S*I2 - (sigma+mu)*E))**2
+    phys += (dI1 - (p*sigma*E - (gamma1+mu+delta1)*I1))**2
+    phys += (dI2 - ((1-p)*sigma*E - (gamma2+mu+delta2)*I2))**2
+    phys += (dR - (gamma1*I1 + gamma2*I2 - mu*R))**2
+
+    I_pred = I1 + I2
+    D_pred = delta1*I1 + delta2*I2
+
+    data_loss = torch.mean((I_pred - torch.tensor(I_data_scaled))**2)
+    data_loss += torch.mean((D_pred - torch.tensor(D_data_scaled[:len(years)]))**2)
+
+    return data_loss + phys.mean(), phys.mean()
+
+optimizer = optim.Adam(list(model.parameters()) + [theta], lr=1e-3)
+
+for _ in range(5000):
+    optimizer.zero_grad()
+    loss, phys_res = pinn_loss()
+    loss.backward()
+    optimizer.step()
+
+theta_pinn = torch.exp(theta).detach().numpy()
+pinn_error = loss.item()
+phys_residual = phys_res.item()
+
+# ======================================================
+# OUTPUT
+# ======================================================
+print("\n====== CLS ESTIMATED PARAMETERS ======")
+for n,v in zip(names, theta_cls):
+    print(f"{n:8s} = {v:.6e}")
+print(f"CLS Data MSE = {cls_error:.3e}")
+
+print("\n====== PINN ESTIMATED PARAMETERS ======")
+for n,v in zip(names, theta_pinn):
+    print(f"{n:8s} = {v:.6e}")
+print(f"PINN Total Loss = {pinn_error:.3e}")
+print(f"PINN Physics Residual = {phys_residual:.3e}")
+
+print("\n====== PARAMETER COMPARISON ======")
+for i,n in enumerate(names):
+    rel = abs(theta_cls[i]-theta_pinn[i])/(theta_cls[i]+1e-8)
+    print(f"{n:8s} | CLS = {theta_cls[i]:.3e} | PINN = {theta_pinn[i]:.3e} | RelDiff = {rel:.3e}")
