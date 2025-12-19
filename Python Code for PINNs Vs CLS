@@ -1,0 +1,137 @@
+# ======================================================
+# REPRODUCIBILITY
+# ======================================================
+import os, random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from scipy.optimize import minimize
+
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+os.environ["PYTHONHASHSEED"] = str(SEED)
+
+# ======================================================
+# DATA (Only I is observed)
+# ======================================================
+I_data = np.array([179.5,179.8,179.6,178.5,177.3,175.1,172.2,169.5,166.9,163.2,
+                   160.5,156.9,152.6,149.5,146,141.2,137.9,134.5,131.4,128,
+                   130.9,133.8,134]) / 1e5
+
+t_obs = np.arange(len(I_data))
+
+# ======================================================
+# FIXED MODEL CONSTANTS
+# ======================================================
+sigma = 0.5
+p = 0.6
+
+# ======================================================
+# CLS MODEL (I-only)
+# ======================================================
+def simulate_I(theta):
+    beta1, beta2, G1, G2 = theta
+    dt = 0.1
+    t = np.arange(0, t_obs[-1] + 1, dt)
+
+    S = np.zeros_like(t)
+    E = np.zeros_like(t)
+    I1 = np.zeros_like(t)
+    I2 = np.zeros_like(t)
+
+    # Initial conditions (scaled)
+    S[0], E[0], I1[0], I2[0] = 10, 5, 3, 1
+
+    for k in range(1, len(t)):
+        S[k]  = S[k-1] - dt*(beta1*S[k-1]*I1[k-1] + beta2*S[k-1]*I2[k-1])
+        E[k]  = E[k-1] + dt*(beta1*S[k-1]*I1[k-1] + beta2*S[k-1]*I2[k-1] - sigma*E[k-1])
+        I1[k] = I1[k-1] + dt*(p*sigma*E[k-1] - G1*I1[k-1])
+        I2[k] = I2[k-1] + dt*((1-p)*sigma*E[k-1] - G2*I2[k-1])
+
+    I = I1 + I2
+    return np.interp(t_obs, t, I)
+
+def cls_loss(theta):
+    return np.mean((simulate_I(theta) - I_data)**2)
+
+theta0 = [0.3, 0.15, 0.15, 0.1]
+bounds = [(0.05,1), (0.05,1), (0.05,0.5), (0.05,0.5)]
+
+cls_res = minimize(cls_loss, theta0, bounds=bounds, method="L-BFGS-B")
+theta_cls = cls_res.x
+cls_mse = cls_loss(theta_cls)
+
+# ======================================================
+# PINNs (Same Parameters)
+# ======================================================
+t_tensor = torch.tensor(t_obs, dtype=torch.float32).view(-1,1)
+
+class PINN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1,32), nn.Tanh(),
+            nn.Linear(32,32), nn.Tanh(),
+            nn.Linear(32,4)
+        )
+    def forward(self, t):
+        return self.net(t)
+
+model = PINN()
+theta = nn.Parameter(torch.log(torch.tensor(theta0)))
+optimizer = optim.Adam(list(model.parameters()) + [theta], lr=1e-3)
+
+def pinn_loss():
+    beta1, beta2, G1, G2 = torch.exp(theta)
+
+    t_tensor.requires_grad_(True)
+    S, E, I1, I2 = model(t_tensor).T
+
+    dS = torch.autograd.grad(S, t_tensor, torch.ones_like(S), create_graph=True)[0]
+    dE = torch.autograd.grad(E, t_tensor, torch.ones_like(E), create_graph=True)[0]
+    dI1 = torch.autograd.grad(I1, t_tensor, torch.ones_like(I1), create_graph=True)[0]
+    dI2 = torch.autograd.grad(I2, t_tensor, torch.ones_like(I2), create_graph=True)[0]
+
+    phys = (dS + beta1*S*I1 + beta2*S*I2)**2
+    phys += (dE - (beta1*S*I1 + beta2*S*I2 - sigma*E))**2
+    phys += (dI1 - (p*sigma*E - G1*I1))**2
+    phys += (dI2 - ((1-p)*sigma*E - G2*I2))**2
+
+    I_pred = I1 + I2
+    data_loss = torch.mean((I_pred - torch.tensor(I_data))**2)
+
+    return data_loss + phys.mean(), data_loss, phys.mean()
+
+for _ in range(4000):
+    optimizer.zero_grad()
+    loss, data_l, phys_l = pinn_loss()
+    loss.backward()
+    optimizer.step()
+
+theta_pinn = torch.exp(theta).detach().numpy()
+pinn_mse = data_l.item()
+phys_res = phys_l.item()
+
+# ======================================================
+# FINAL COMPARISON OUTPUT
+# ======================================================
+names = ['beta1','beta2','Gamma1','Gamma2']
+
+print("\n================ CLS ESTIMATES =================")
+for n,v in zip(names, theta_cls):
+    print(f"{n:7s} = {v:.6f}")
+print(f"CLS MSE(I) = {cls_mse:.3e}")
+
+print("\n================ PINN ESTIMATES =================")
+for n,v in zip(names, theta_pinn):
+    print(f"{n:7s} = {v:.6f}")
+print(f"PINN MSE(I) = {pinn_mse:.3e}")
+print(f"PINN Physics Residual = {phys_res:.3e}")
+
+print("\n================ RELATIVE DIFFERENCE =================")
+for i,n in enumerate(names):
+    rd = abs(theta_cls[i] - theta_pinn[i]) / (theta_cls[i] + 1e-8)
+    print(f"{n:7s} : {rd:.3e}")
