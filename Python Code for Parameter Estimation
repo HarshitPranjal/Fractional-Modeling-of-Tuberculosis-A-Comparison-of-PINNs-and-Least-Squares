@@ -20,140 +20,175 @@ from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 
 # ======================================================
-# DATA
+# DATA (Observed: I = Ia + Ip)
 # ======================================================
-I_data = np.array([179.5,179.8,179.6,197.7,178.5,177.3,175.1,172.2,169.5,166.9,163.2,
-                   160.5,156.9,152.6,149.5,146,141.2,137.9,134.5,131.4,128,130.9])
-D_data = np.array([32.4,31.4,30.4,29.4,28,27.2,26.1,24.9,23.9,22.6,
-                   21.5,20.6,19.7,19,18.2,17.4,16.8,16.1,15.6,14.9,14.4,14])
+I_data = np.array([
+    179.5,179.8,179.6,197.7,178.5,177.3,175.1,172.2,
+    169.5,166.9,163.2,160.5,156.9,152.6,149.5,146,
+    141.2,137.9,134.5,131.4,128,130.9
+])
 
 pop = 1e5
 I_data_scaled = I_data / pop
-D_data_scaled = D_data / pop
-
 years = np.arange(2000, 2000 + len(I_data_scaled))
-names = ['Lambda','beta1','beta2','gamma1','gamma2','delta1','delta2']
+
+# ======================================================
+# PARAMETER NAMES & INITIAL GUESSES
+# ======================================================
+names = ["r","alpha","delta0","delta1","lambda1","lambda2","xi1","xi2","xi3"]
+
+theta0 = np.array([
+    0.03, 0.75, 0.02, 0.005,
+    0.09, 0.10, 0.07, 0.01, 0.07
+])
+
+eta0 = 0.88
+K = 1.0
 
 # ======================================================
 # CLS MODEL
 # ======================================================
-def simulate_model(theta, years):
-    Lambda, beta1, beta2, gamma1, gamma2, delta1, delta2 = theta
-    sigma, p, mu = 0.5, 0.6, 0.0001
+def simulate_model(theta, eta, years):
+    r,a,d0,d1,l1,l2,x1,x2,x3 = theta
+
+    rE,aE = r**eta, a**eta
+    d0E,d1E = d0**eta, d1**eta
+    l1E,l2E = l1**eta, l2**eta
+    x1E,x2E,x3E = x1**eta, x2**eta, x3**eta
 
     dt = 0.1
-    n_steps = int((years[-1]-years[0])/dt) + 1
-    t_grid = np.linspace(years[0], years[-1], n_steps)
+    t = np.linspace(years[0], years[-1], int((years[-1]-years[0])/dt)+1)
 
-    S = np.zeros(n_steps)
-    E = np.zeros(n_steps)
-    I1 = np.zeros(n_steps)
-    I2 = np.zeros(n_steps)
-    R = np.zeros(n_steps)
+    N,E,Ia,Ip,R = [np.zeros_like(t) for _ in range(5)]
+    N[0],E[0],Ia[0],Ip[0],R[0] = 1.0,0.06,0.02,0.01,0.0
 
-    S[0], E[0], I1[0], I2[0], R[0] = 10, 5, 3, 1, 0
+    for i in range(1,len(t)):
+        Tot = N[i-1]+E[i-1]+Ia[i-1]+Ip[i-1]+R[i-1]
+        inf = aE*N[i-1]*(Ia[i-1]+Ip[i-1])/Tot
 
-    for t in range(1, n_steps):
-        S[t]  = S[t-1] + dt*(Lambda - beta1*S[t-1]*I1[t-1] - beta2*S[t-1]*I2[t-1] - mu*S[t-1])
-        E[t]  = E[t-1] + dt*(beta1*S[t-1]*I1[t-1] + beta2*S[t-1]*I2[t-1] - (sigma + mu)*E[t-1])
-        I1[t] = I1[t-1] + dt*(p*sigma*E[t-1] - (gamma1 + mu + delta1)*I1[t-1])
-        I2[t] = I2[t-1] + dt*((1-p)*sigma*E[t-1] - (gamma2 + mu + delta2)*I2[t-1])
-        R[t]  = R[t-1] + dt*(gamma1*I1[t-1] + gamma2*I2[t-1] - mu*R[t-1])
+        N[i]  = N[i-1] + dt*(rE*N[i-1]*(1-N[i-1]/K)-inf-d0E*N[i-1]+d1E*R[i-1])
+        E[i]  = E[i-1] + dt*(inf-(d0E+l1E+l2E)*E[i-1])
+        Ia[i] = Ia[i-1] + dt*(l1E*E[i-1]-(x1E+x2E+d0E)*Ia[i-1])
+        Ip[i] = Ip[i-1] + dt*(l2E*E[i-1]+x2E*Ia[i-1]-(x3E+d0E)*Ip[i-1])
+        R[i]  = R[i-1] + dt*(x1E*Ia[i-1]+x3E*Ip[i-1]-(d0E+d1E)*R[i-1])
 
-    I_total = I1 + I2
-    D_total = delta1*I1 + delta2*I2
-
-    I_interp = interp1d(t_grid, I_total)
-    D_interp = interp1d(t_grid, D_total)
-
-    return I_interp(years), D_interp(years)
-
-def cls_objective(theta):
-    I_pred, D_pred = simulate_model(theta, years)
-    return np.mean((I_pred - I_data_scaled)**2) + \
-           np.mean((D_pred - D_data_scaled[:len(years)])**2)
-
-theta0 = [0.00016, 0.36, 0.18, 0.14, 0.10, 0.0007, 0.0009]
-bounds = [(1e-5,1e-3),(0.1,1),(0.05,0.5),(0.05,0.3),(0.05,0.2),(1e-4,0.01),(1e-4,0.01)]
-
-res = minimize(cls_objective, theta0, bounds=bounds, method='L-BFGS-B')
-theta_cls = res.x
-cls_error = cls_objective(theta_cls)
+    return interp1d(t, Ia+Ip)(years)
 
 # ======================================================
-# PINNs
+# CLS OPTIMIZATION
 # ======================================================
-t_tensor = torch.tensor(years, dtype=torch.float32).unsqueeze(-1)
+bounds = [
+    (0.028,0.033),(0.72,0.77),
+    (0.017,0.022),(0.003,0.008),
+    (0.045,0.095),(0.07,0.12),
+    (0.04,0.09),(0.007,0.012),(0.04,0.09),
+    (0.90,0.95)
+]
+
+def cls_objective(z):
+    return np.mean((simulate_model(z[:-1],z[-1],years)-I_data_scaled)**2)
+
+z0 = np.concatenate([theta0,[eta0]])
+res = minimize(cls_objective,z0,bounds=bounds,method="L-BFGS-B")
+
+theta_cls = res.x[:-1]
+eta_cls   = res.x[-1]
+
+# ======================================================
+# PINN MODEL
+# ======================================================
+t_tensor = torch.tensor(years,dtype=torch.float32).unsqueeze(-1)
 
 class PINN(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(1, 32), nn.Tanh(),
-            nn.Linear(32, 32), nn.Tanh(),
-            nn.Linear(32, 5)
+            nn.Linear(1,64),nn.Tanh(),
+            nn.Linear(64,64),nn.Tanh(),
+            nn.Linear(64,5)
         )
-
-    def forward(self, t):
-        return self.net(t)
+    def forward(self,t): return self.net(t)
 
 model = PINN()
-theta = nn.Parameter(torch.log(torch.tensor(theta0, dtype=torch.float32)))
 
+theta = nn.Parameter(torch.log(torch.tensor(theta0,dtype=torch.float32)))
+eta   = nn.Parameter(torch.tensor(0.88,dtype=torch.float32))
+
+def clamp_params():
+    with torch.no_grad():
+        theta.data = torch.clamp(
+            theta.data,
+            torch.log(torch.tensor(0.3*theta0, dtype=torch.float32)),
+            torch.log(torch.tensor(3.0*theta0, dtype=torch.float32))
+        )
+        eta.data = torch.clamp(eta.data, torch.tensor(0.88, dtype=torch.float32), torch.tensor(0.95, dtype=torch.float32))
+
+# ======================================================
+# PINN LOSS
+# ======================================================
 def pinn_loss():
-    sigma, p, mu = 0.5, 0.6, 0.0001
-    Lambda, beta1, beta2, gamma1, gamma2, delta1, delta2 = torch.exp(theta)
+    r,a,d0,d1,l1,l2,x1,x2,x3 = torch.exp(theta)
+    e = eta
+
+    rE,aE = r**e,a**e
+    d0E,d1E = d0**e,d1**e
+    l1E,l2E = l1**e,l2**e
+    x1E,x2E,x3E = x1**e,x2**e,x3**e
 
     t_tensor.requires_grad_(True)
-    S,E,I1,I2,R = model(t_tensor).T
+    N,E,Ia,Ip,R = model(t_tensor).T
 
-    dS  = torch.autograd.grad(S, t_tensor, torch.ones_like(S), create_graph=True)[0]
-    dE  = torch.autograd.grad(E, t_tensor, torch.ones_like(E), create_graph=True)[0]
-    dI1 = torch.autograd.grad(I1, t_tensor, torch.ones_like(I1), create_graph=True)[0]
-    dI2 = torch.autograd.grad(I2, t_tensor, torch.ones_like(I2), create_graph=True)[0]
-    dR  = torch.autograd.grad(R, t_tensor, torch.ones_like(R), create_graph=True)[0]
+    dN  = torch.autograd.grad(N,t_tensor,torch.ones_like(N),create_graph=True)[0]
+    dE  = torch.autograd.grad(E,t_tensor,torch.ones_like(E),create_graph=True)[0]
+    dIa = torch.autograd.grad(Ia,t_tensor,torch.ones_like(Ia),create_graph=True)[0]
+    dIp = torch.autograd.grad(Ip,t_tensor,torch.ones_like(Ip),create_graph=True)[0]
+    dR  = torch.autograd.grad(R,t_tensor,torch.ones_like(R),create_graph=True)[0]
 
-    phys = (dS - (Lambda - beta1*S*I1 - beta2*S*I2 - mu*S))**2
-    phys += (dE - (beta1*S*I1 + beta2*S*I2 - (sigma+mu)*E))**2
-    phys += (dI1 - (p*sigma*E - (gamma1+mu+delta1)*I1))**2
-    phys += (dI2 - ((1-p)*sigma*E - (gamma2+mu+delta2)*I2))**2
-    phys += (dR - (gamma1*I1 + gamma2*I2 - mu*R))**2
+    Tot = N+E+Ia+Ip+R
+    inf = aE*N*(Ia+Ip)/Tot
 
-    I_pred = I1 + I2
-    D_pred = delta1*I1 + delta2*I2
+    phys = (
+        (dN-(rE*N*(1-N/K)-inf-d0E*N+d1E*R))**2 +
+        (dE-(inf-(d0E+l1E+l2E)*E))**2 +
+        (dIa-(l1E*E-(x1E+x2E+d0E)*Ia))**2 +
+        (dIp-(l2E*E+x2E*Ia-(x3E+d0E)*Ip))**2 +
+        (dR-(x1E*Ia+x3E*Ip-(d0E+d1E)*R))**2
+    ).mean()
 
-    data_loss = torch.mean((I_pred - torch.tensor(I_data_scaled))**2)
-    data_loss += torch.mean((D_pred - torch.tensor(D_data_scaled[:len(years)]))**2)
+    data_loss = torch.mean((Ia+Ip - torch.tensor(I_data_scaled, dtype=torch.float32))**2)
+    return data_loss + phys, phys
 
-    return data_loss + phys.mean(), phys.mean()
+# ======================================================
+# TRAINING
+# ======================================================
+optimizer = optim.Adam(list(model.parameters())+[theta,eta],lr=1e-3)
 
-optimizer = optim.Adam(list(model.parameters()) + [theta], lr=1e-3)
-
-for _ in range(5000):
+for epoch in range(4000):
     optimizer.zero_grad()
-    loss, phys_res = pinn_loss()
+    loss, phys = pinn_loss()
     loss.backward()
     optimizer.step()
+    clamp_params()
 
-theta_pinn = torch.exp(theta).detach().numpy()
-pinn_error = loss.item()
-phys_residual = phys_res.item()
+    if epoch % 1000 == 0:
+        print(f"Epoch {epoch:5d} | Loss={loss.item():.3e} | Phys={phys.item():.3e} | eta={eta.item():.6f}")
 
 # ======================================================
-# OUTPUT
+# FINAL PRINTING (CLEAR & PRECISE)
 # ======================================================
-print("\n====== CLS ESTIMATED PARAMETERS ======")
-for n,v in zip(names, theta_cls):
-    print(f"{n:8s} = {v:.6e}")
-print(f"CLS Data MSE = {cls_error:.3e}")
+print("\n================ CLS PARAMETERS ================")
+for n,v in zip(names,theta_cls):
+    print(f"{n:10s} = {v:.10e}")
+print(f"eta        = {eta_cls:.10e}")
 
-print("\n====== PINN ESTIMATED PARAMETERS ======")
-for n,v in zip(names, theta_pinn):
-    print(f"{n:8s} = {v:.6e}")
-print(f"PINN Total Loss = {pinn_error:.3e}")
-print(f"PINN Physics Residual = {phys_residual:.3e}")
+print("\n================ PINN PARAMETERS ================")
+for n,v in zip(names,torch.exp(theta).detach().numpy()):
+    print(f"{n:10s} = {v:.10e}")
+print(f"eta        = {eta.item():.10e}")
 
-print("\n====== PARAMETER COMPARISON ======")
+print("\n=========== CLS vs PINN COMPARISON ==============")
+print(f"{'Param':10s} | {'CLS':>14s} | {'PINN':>14s}")
+print("-"*45)
 for i,n in enumerate(names):
-    rel = abs(theta_cls[i]-theta_pinn[i])/(theta_cls[i]+1e-8)
-    print(f"{n:8s} | CLS = {theta_cls[i]:.3e} | PINN = {theta_pinn[i]:.3e} | RelDiff = {rel:.3e}")
+    print(f"{n:10s} | {theta_cls[i]:14.10e} | {torch.exp(theta[i]).item():14.10e}")
+print(f"{'eta':10s} | {eta_cls:14.10e} | {eta.item():14.10e}")
