@@ -1,51 +1,68 @@
 clc; clear; close all;
 
-% ================================================================
-% Fractional RK-2 Simulation for SEI1I2R Model
-% ================================================================
-
 % ----------------------------
 % Numerical parameters
 % ----------------------------
-h   = 0.1;           
-T   = 10;             % (You can change this if needed)
-N   = round(T/h);    
-t   = 0:h:T;         
+h   = 0.1;
+T   = 40;
+N   = round(T/h);
+t   = 0:h:T;
 
-alpha = 0.85;                         % fractional order
-gamma_a = gamma(alpha + 1);           % Gamma(alpha+1)
+eta = 1;                           % fractional order
+gamma_eta = gamma(eta + 1);           % Gamma(eta+1)
 
 % ----------------------------
-% Model parameters (UPDATED)
+% Model parameters
 % ----------------------------
-Lambda = 0.00007204495;
-beta1 = 0.3579538;
-beta2 = 0.1793964;
-gamma1 = 0.1380288;
-gamma2 = 0.09626908;
-delta1 = 0.0006947402;
-delta2 = 0.0008927623;
-mu      = 0.0001;
-sigma   = 0.5;
-p       = 0.44;
+r1      = 0.0258621;
+alph  = 0.5673738;
+delta = 0.0146286;       
+delta2 = 0.0035871;
+lambda = 0.0823676;
+lambda3 = 0.0909647;
+xi    = 0.0663605;
+xi8    = 0.0095471;
+xi9   = 0.0750061;
+K = 1;
+r = r1^eta;
+alpha = alph^eta;
+delta0 = delta^eta;
+delta1 = delta2^eta;
+lambda1 = lambda^eta;
+lambda2 = lambda3^eta;
+xi1 = xi^eta;
+xi2 = xi8^eta;
+xi3 = xi9^eta;
 
 % ----------------------------
 % RHS (Fractional ODEs)
 % ----------------------------
-dS  = @(S,E,I1,I2,R) Lambda - beta1*S.*I1 - beta2*S.*I2 - mu*S;
-dE  = @(S,E,I1,I2,R) beta1*S.*I1 + beta2*S.*I2 - (sigma+mu)*E;
-dI1 = @(S,E,I1,I2,R) p*sigma*E - (gamma1+mu+delta1)*I1;
-dI2 = @(S,E,I1,I2,R) (1-p)*sigma*E - (gamma2+mu+delta2)*I2;
-dR  = @(S,E,I1,I2,R) gamma1*I1 + gamma2*I2 - mu*R;
+dN  = @(N,E,Ia,Ip,R) ...
+      r*N.*(1 - N/K) ...
+    - alpha*N.*(Ia+Ip)./(N+E+Ia+Ip+R) ...
+    - delta0*N + delta1*R;
+
+dE  = @(N,E,Ia,Ip,R) ...
+      alpha*N.*(Ia+Ip)./(N+E+Ia+Ip+R) ...
+    - (delta0 + lambda1 + lambda2).*E;
+
+dIa = @(N,E,Ia,Ip,R) ...
+      lambda1*E - (xi1 + xi2 + delta0).*Ia;
+
+dIp = @(N,E,Ia,Ip,R) ...
+      lambda2*E + xi2*Ia - (xi3 + delta0).*Ip;
+
+dR  = @(N,E,Ia,Ip,R) ...
+      xi1*Ia + xi3*Ip - (delta0 + delta1).*R;
 
 % ----------------------------
 % Initial conditions
 % ----------------------------
-S(1)  =10;
-E(1)  = 5;
-I1(1) = 3;
-I2(1) = 2;
-R(1)  = 0;
+Npop(1) = 1;
+E(1) = 0.06;
+Ia(1) = 0.02;
+Ip(1) = 0.01;
+R(1) = 0;
 
 % ----------------------------
 % Fractional RK-2 Integration
@@ -53,32 +70,32 @@ R(1)  = 0;
 for k = 1:N
 
     % ---- k1 ----
-    k1S  = dS(S(k),E(k),I1(k),I2(k),R(k));
-    k1E  = dE(S(k),E(k),I1(k),I2(k),R(k));
-    k1I1 = dI1(S(k),E(k),I1(k),I2(k),R(k));
-    k1I2 = dI2(S(k),E(k),I1(k),I2(k),R(k));
-    k1R  = dR(S(k),E(k),I1(k),I2(k),R(k));
+    k1N  = dN(Npop(k),E(k),Ia(k),Ip(k),R(k));
+    k1E  = dE(Npop(k),E(k),Ia(k),Ip(k),R(k));
+    k1Ia = dIa(Npop(k),E(k),Ia(k),Ip(k),R(k));
+    k1Ip = dIp(Npop(k),E(k),Ia(k),Ip(k),R(k));
+    k1R  = dR(Npop(k),E(k),Ia(k),Ip(k),R(k));
 
     % ---- midpoint ----
-    S_mid  = S(k)  + 0.5*(h^alpha)/gamma_a*k1S;
-    E_mid  = E(k)  + 0.5*(h^alpha)/gamma_a*k1E;
-    I1_mid = I1(k) + 0.5*(h^alpha)/gamma_a*k1I1;
-    I2_mid = I2(k) + 0.5*(h^alpha)/gamma_a*k1I2;
-    R_mid  = R(k)  + 0.5*(h^alpha)/gamma_a*k1R;
+    N_mid  = Npop(k) + 0.5*(h^eta)/gamma_eta * k1N;
+    E_mid  = E(k)    + 0.5*(h^eta)/gamma_eta * k1E;
+    Ia_mid = Ia(k)   + 0.5*(h^eta)/gamma_eta * k1Ia;
+    Ip_mid = Ip(k)   + 0.5*(h^eta)/gamma_eta * k1Ip;
+    R_mid  = R(k)    + 0.5*(h^eta)/gamma_eta * k1R;
 
     % ---- k2 ----
-    k2S  = dS(S_mid,E_mid,I1_mid,I2_mid,R_mid);
-    k2E  = dE(S_mid,E_mid,I1_mid,I2_mid,R_mid);
-    k2I1 = dI1(S_mid,E_mid,I1_mid,I2_mid,R_mid);
-    k2I2 = dI2(S_mid,E_mid,I1_mid,I2_mid,R_mid);
-    k2R  = dR(S_mid,E_mid,I1_mid,I2_mid,R_mid);
+    k2N  = dN(N_mid,E_mid,Ia_mid,Ip_mid,R_mid);
+    k2E  = dE(N_mid,E_mid,Ia_mid,Ip_mid,R_mid);
+    k2Ia = dIa(N_mid,E_mid,Ia_mid,Ip_mid,R_mid);
+    k2Ip = dIp(N_mid,E_mid,Ia_mid,Ip_mid,R_mid);
+    k2R  = dR(N_mid,E_mid,Ia_mid,Ip_mid,R_mid);
 
     % ---- Update ----
-    S(k+1)  = S(k)  + (h^alpha)/gamma_a * k2S;
-    E(k+1)  = E(k)  + (h^alpha)/gamma_a * k2E;
-    I1(k+1) = I1(k) + (h^alpha)/gamma_a * k2I1;
-    I2(k+1) = I2(k) + (h^alpha)/gamma_a * k2I2;
-    R(k+1)  = R(k)  + (h^alpha)/gamma_a * k2R;
+    Npop(k+1) = Npop(k) + (h^eta)/gamma_eta * k2N;
+    E(k+1)    = E(k)    + (h^eta)/gamma_eta * k2E;
+    Ia(k+1)   = Ia(k)   + (h^eta)/gamma_eta * k2Ia;
+    Ip(k+1)   = Ip(k)   + (h^eta)/gamma_eta * k2Ip;
+    R(k+1)    = R(k)    + (h^eta)/gamma_eta * k2R;
 end
 
 % ----------------------------
@@ -86,14 +103,16 @@ end
 % ----------------------------
 figure('Color','w'); hold on; grid on;
 
-plot(t, S,'LineWidth',2);
-plot(t, E,'LineWidth',2);
-plot(t, I1,'LineWidth',2);
-plot(t, I2,'LineWidth',2);
-plot(t, R,'LineWidth',2);
+plot(t,Npop,'LineWidth',2);
+plot(t,E,'LineWidth',2);
+plot(t,Ia,'LineWidth',2);
+plot(t,Ip,'LineWidth',2);
+plot(t,R,'LineWidth',2);
 
 xlabel('Time (t)','FontSize',12,'FontWeight','bold');
 ylabel('Population Fractions','FontSize',12,'FontWeight','bold');
-title(sprintf('Model (\\alpha = %.2f)',alpha),...
-    'FontSize',14,'FontWeight','bold');
-legend({'S(t)','E(t)','I_1(t)','I_2(t)','R(t)'},'Location','best','FontSize',12);
+title(sprintf('Fractional Model - PINNS (\\eta = %.3f)',1),...
+      'FontSize',14,'FontWeight','bold');
+
+legend({'N(t)','E(t)','I_a(t)','I_p(t)','R(t)'},...
+       'Location','best','FontSize',12);
